@@ -13,6 +13,7 @@
 #include "ObjectMgr.h"
 #include "Player.h"
 #include "PlayerbotAI.h"
+#include "PlayerbotAIConfig.h"
 #include "PlayerbotMgr.h"
 #include "Playerbots.h"
 #include "RandomPlayerbotMgr.h"
@@ -4112,6 +4113,96 @@ void SendStatsPackets(Player* player, ChatMsg replyType)
     }
 }
 
+bool HasMaintenancePolicyAccess(Player* player)
+{
+    for (Player* const bot : GetBridgeVisibleBots(player))
+    {
+        PlayerbotAI* const botAI = GetBotAI(bot);
+        if (botAI && botAI->IsAltBot() && botAI->GetMaster() == player)
+            return true;
+    }
+
+    return false;
+}
+
+bool TryParseLevel(std::string const& value, uint32& level)
+{
+    std::string const trimmed = Trim(value);
+    if (trimmed.empty() || !std::all_of(trimmed.begin(), trimmed.end(), [](unsigned char c) { return std::isdigit(c); }))
+        return false;
+
+    unsigned long const parsed = std::strtoul(trimmed.c_str(), nullptr, 10);
+    if (parsed > std::numeric_limits<uint32>::max())
+        return false;
+
+    level = static_cast<uint32>(parsed);
+    return true;
+}
+
+void SendMaintenancePolicy(Player* player, ChatMsg replyType)
+{
+    if (!HasMaintenancePolicyAccess(player))
+    {
+        SendAddonPacket(player, replyType, "MAINT_POLICY_ERROR", "UNAUTHORIZED");
+        return;
+    }
+
+    PlayerbotAIConfig::AltMaintenancePolicy const& policy = sPlayerbotAIConfig.GetAltMaintenancePolicy();
+    std::ostringstream payload;
+    payload << (policy.repairEnabled ? "ON" : "OFF") << kFieldSeparator
+            << static_cast<uint32>(policy.minMasterLevel);
+    SendAddonPacket(player, replyType, "MAINT_POLICY", payload.str());
+}
+
+void RunMaintenanceRepairPolicy(Player* player, ChatMsg replyType, std::string const& requestToken, std::string const& value)
+{
+    std::string const token = Trim(requestToken);
+    if (!HasMaintenancePolicyAccess(player))
+    {
+        SendAddonPacket(player, replyType, "MAINT_REPAIR_ERROR", token + kFieldSeparator + "UNAUTHORIZED");
+        return;
+    }
+
+    std::string const normalized = ToUpper(Trim(value));
+    if (normalized != "ON" && normalized != "OFF")
+    {
+        SendAddonPacket(player, replyType, "MAINT_REPAIR_ERROR", token + kFieldSeparator + "EXPECTED_ON_OR_OFF");
+        return;
+    }
+
+    sPlayerbotAIConfig.SetAltMaintenanceRepairEnabled(normalized == "ON");
+    SendAddonPacket(player, replyType, "MAINT_REPAIR_ACK", token + kFieldSeparator + normalized);
+}
+
+void RunMaintenanceMinLevelPolicy(Player* player, ChatMsg replyType, std::string const& requestToken, std::string const& value)
+{
+    std::string const token = Trim(requestToken);
+    if (!HasMaintenancePolicyAccess(player))
+    {
+        SendAddonPacket(player, replyType, "MAINT_MIN_LEVEL_ERROR", token + kFieldSeparator + "UNAUTHORIZED");
+        return;
+    }
+
+    uint32 level = 0;
+    if (!TryParseLevel(value, level))
+    {
+        SendAddonPacket(player, replyType, "MAINT_MIN_LEVEL_ERROR", token + kFieldSeparator + "EXPECTED_INTEGER");
+        return;
+    }
+
+    if (!sPlayerbotAIConfig.SetAltMaintenanceMinMasterLevel(level))
+    {
+        std::ostringstream reason;
+        reason << token << kFieldSeparator << "OUT_OF_RANGE_1_" << DEFAULT_MAX_LEVEL;
+        SendAddonPacket(player, replyType, "MAINT_MIN_LEVEL_ERROR", reason.str());
+        return;
+    }
+
+    std::ostringstream response;
+    response << token << kFieldSeparator << level;
+    SendAddonPacket(player, replyType, "MAINT_MIN_LEVEL_ACK", response.str());
+}
+
 bool HandleBridgeOpcode(Player* player, ChatMsg replyType, std::string const& opcode, std::string const& payload)
 {
     std::string const normalized = ToUpper(Trim(opcode));
@@ -4132,6 +4223,12 @@ bool HandleBridgeOpcode(Player* player, ChatMsg replyType, std::string const& op
     {
         std::pair<std::string, std::string> const request = SplitOnce(payload, kFieldSeparator);
         std::string const requestType = ToUpper(Trim(request.first));
+
+        if (requestType == "MAINT_POLICY")
+        {
+            SendMaintenancePolicy(player, replyType);
+            return true;
+        }
 
         if (requestType == "ROSTER")
         {
@@ -4309,6 +4406,20 @@ bool HandleBridgeOpcode(Player* player, ChatMsg replyType, std::string const& op
     {
         std::pair<std::string, std::string> const request = SplitOnce(payload, kFieldSeparator);
         std::string const requestType = ToUpper(Trim(request.first));
+
+        if (requestType == "MAINT_REPAIR")
+        {
+            std::pair<std::string, std::string> const policyRequest = SplitOnce(request.second, kFieldSeparator);
+            RunMaintenanceRepairPolicy(player, replyType, policyRequest.first, policyRequest.second);
+            return true;
+        }
+
+        if (requestType == "MAINT_MIN_LEVEL")
+        {
+            std::pair<std::string, std::string> const policyRequest = SplitOnce(request.second, kFieldSeparator);
+            RunMaintenanceMinLevelPolicy(player, replyType, policyRequest.first, policyRequest.second);
+            return true;
+        }
 
         if (requestType == "OUTFIT")
         {

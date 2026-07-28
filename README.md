@@ -317,6 +317,26 @@ Server -> Addon:  MBOT STATES~...
 
 The exact payloads are consumed internally by the MultiBot addon.
 
+## Runtime maintenance policy
+
+Maintenance policy access uses the existing requester ownership boundary: the requester must control at least one visible alt bot. Values are held in memory and reset from Playerbots configuration when worldserver restarts.
+
+```text
+Addon  -> Server: MBOT GET~MAINT_POLICY
+Server -> Addon:  MBOT MAINT_POLICY~<ON|OFF>~<minimumMasterLevel>
+Server -> Addon:  MBOT MAINT_POLICY_ERROR~UNAUTHORIZED
+
+Addon  -> Server: MBOT RUN~MAINT_REPAIR~<requestToken>~<ON|OFF>
+Server -> Addon:  MBOT MAINT_REPAIR_ACK~<requestToken>~<ON|OFF>
+Server -> Addon:  MBOT MAINT_REPAIR_ERROR~<requestToken>~<reason>
+
+Addon  -> Server: MBOT RUN~MAINT_MIN_LEVEL~<requestToken>~<level>
+Server -> Addon:  MBOT MAINT_MIN_LEVEL_ACK~<requestToken>~<effectiveLevel>
+Server -> Addon:  MBOT MAINT_MIN_LEVEL_ERROR~<requestToken>~<reason>
+```
+
+Repair accepts only `ON` or `OFF` (case-insensitive). Minimum level accepts decimal integers from 1 through the core `DEFAULT_MAX_LEVEL` (80 for Wrath).
+
 ---
 
 # Supported Bridge Areas
@@ -333,6 +353,14 @@ The exact payloads are consumed internally by the MultiBot addon.
   <tr>
     <td><code>PING</code> / <code>PONG</code></td>
     <td>Connection check between addon and bridge.</td>
+  </tr>
+  <tr>
+    <td><code>GET~MAINT_POLICY</code></td>
+    <td>Query the runtime alt-maintenance repair and minimum-master-level policy.</td>
+  </tr>
+  <tr>
+    <td><code>RUN~MAINT_REPAIR</code> / <code>RUN~MAINT_MIN_LEVEL</code></td>
+    <td>Update the authorized runtime policy in memory until worldserver restarts.</td>
   </tr>
   <tr>
     <td><code>GET~ROSTER</code></td>
