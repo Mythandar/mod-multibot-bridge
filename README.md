@@ -317,6 +317,68 @@ Server -> Addon:  MBOT STATES~...
 
 The exact payloads are consumed internally by the MultiBot addon.
 
+## Runtime maintenance policy
+
+Maintenance policy access uses the existing requester ownership boundary: the requester must control at least one visible alt bot. Values are held in memory and reset from Playerbots configuration when worldserver restarts.
+
+```text
+Addon  -> Server: MBOT GET~MAINTENANCE_POLICY~<requestToken>
+Server -> Addon:  MBOT MAINTENANCE_POLICY~<requestToken>~GLOBAL_ALT_BOTS~<ON|OFF>~<minimumMasterLevel>
+
+Addon  -> Server: MBOT RUN~MAINTENANCE_POLICY~<requestToken>~<field>~<urlEncodedValue>
+Server -> Addon:  MBOT MAINTENANCE_POLICY_RESULT~<requestToken>~SUCCESS~GLOBAL_ALT_BOTS~<field>~<normalizedValue>~~<ON|OFF>~<minimumMasterLevel>
+Server -> Addon:  MBOT MAINTENANCE_POLICY_RESULT~<requestToken>~FAILURE~GLOBAL_ALT_BOTS~<field>~~<urlEncodedReason>
+```
+
+The writable fields are `REPAIR_ENABLED` (`ON` or `OFF`, case-insensitive) and
+`MIN_MASTER_LEVEL` (a decimal integer from 1 through the core `DEFAULT_MAX_LEVEL`;
+80 for Wrath). Every successful write includes the complete normalized policy.
+Tokens, fields, values, and reasons use the bridge URL field encoding. The complete
+response is under 100 bytes with the current fields.
+
+The following earlier maintenance messages remain supported for addon compatibility:
+
+```text
+Addon  -> Server: MBOT GET~MAINT_POLICY
+Server -> Addon:  MBOT MAINT_POLICY~<ON|OFF>~<minimumMasterLevel>
+Server -> Addon:  MBOT MAINT_POLICY_ERROR~UNAUTHORIZED
+
+Addon  -> Server: MBOT RUN~MAINT_REPAIR~<requestToken>~<ON|OFF>
+Server -> Addon:  MBOT MAINT_REPAIR_ACK~<requestToken>~<ON|OFF>
+Server -> Addon:  MBOT MAINT_REPAIR_ERROR~<requestToken>~<reason>
+
+Addon  -> Server: MBOT RUN~MAINT_MIN_LEVEL~<requestToken>~<level>
+Server -> Addon:  MBOT MAINT_MIN_LEVEL_ACK~<requestToken>~<effectiveLevel>
+Server -> Addon:  MBOT MAINT_MIN_LEVEL_ERROR~<requestToken>~<reason>
+```
+
+Repair accepts only `ON` or `OFF` (case-insensitive). Minimum level accepts decimal integers from 1 through the core `DEFAULT_MAX_LEVEL` (80 for Wrath). The minimum applies to the controlling player/master, not the bot.
+
+### Semantics and validation
+
+- Scope is `GLOBAL_ALT_BOTS`: a successful update changes the in-memory policy for all alt bots on the worldserver.
+- Query and update access requires the requester to control at least one currently visible alt bot. Random bots are not used to grant access.
+- A write changes exactly one named field and returns the complete normalized policy, so omitted fields are never reset.
+- Configuration files are never modified. Values reset from Playerbots configuration when worldserver restarts.
+- `AiPlayerbot.MaintenanceCommand` and the startup-only per-operation `AiPlayerbot.AltMaintenance*` switches remain authoritative. The repair and minimum-level configuration entries initialize their runtime fields.
+- Tokens are required and limited to 64 characters. Encoded field and value inputs are bounded before use.
+- Unknown fields, malformed booleans, non-integer levels, out-of-range levels, oversized values, invalid tokens, and unauthorized requests return `FAILURE` without changing policy.
+
+Structured failure reasons currently include `INVALID_TOKEN`, `UNAUTHORIZED`, `VALUE_TOO_LONG`, `EXPECTED_ON_OR_OFF`, `EXPECTED_INTEGER`, `OUT_OF_RANGE_1_80`, and `UNKNOWN_FIELD`. Error reasons and user-controlled fields use the bridge URL field encoding. Unsupported opcodes retain the normal bridge behavior and do not alter existing opcode formats.
+
+### Examples
+
+```text
+MBOT GET~MAINTENANCE_POLICY~42-maint-1
+MBOT MAINTENANCE_POLICY~42-maint-1~GLOBAL_ALT_BOTS~ON~1
+
+MBOT RUN~MAINTENANCE_POLICY~42-maint-2~REPAIR_ENABLED~OFF
+MBOT MAINTENANCE_POLICY_RESULT~42-maint-2~SUCCESS~GLOBAL_ALT_BOTS~REPAIR_ENABLED~OFF~~OFF~1
+
+MBOT RUN~MAINTENANCE_POLICY~42-maint-3~MIN_MASTER_LEVEL~81
+MBOT MAINTENANCE_POLICY_RESULT~42-maint-3~FAILURE~GLOBAL_ALT_BOTS~MIN_MASTER_LEVEL~~OUT_OF_RANGE_1_80
+```
+
 ---
 
 # Supported Bridge Areas
@@ -333,6 +395,14 @@ The exact payloads are consumed internally by the MultiBot addon.
   <tr>
     <td><code>PING</code> / <code>PONG</code></td>
     <td>Connection check between addon and bridge.</td>
+  </tr>
+  <tr>
+    <td><code>GET~MAINT_POLICY</code></td>
+    <td>Query the runtime alt-maintenance repair and minimum-master-level policy.</td>
+  </tr>
+  <tr>
+    <td><code>RUN~MAINT_REPAIR</code> / <code>RUN~MAINT_MIN_LEVEL</code></td>
+    <td>Update the authorized runtime policy in memory until worldserver restarts.</td>
   </tr>
   <tr>
     <td><code>GET~ROSTER</code></td>
