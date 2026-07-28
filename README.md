@@ -322,6 +322,23 @@ The exact payloads are consumed internally by the MultiBot addon.
 Maintenance policy access uses the existing requester ownership boundary: the requester must control at least one visible alt bot. Values are held in memory and reset from Playerbots configuration when worldserver restarts.
 
 ```text
+Addon  -> Server: MBOT GET~MAINTENANCE_POLICY~<requestToken>
+Server -> Addon:  MBOT MAINTENANCE_POLICY~<requestToken>~GLOBAL_ALT_BOTS~<ON|OFF>~<minimumMasterLevel>
+
+Addon  -> Server: MBOT RUN~MAINTENANCE_POLICY~<requestToken>~<field>~<urlEncodedValue>
+Server -> Addon:  MBOT MAINTENANCE_POLICY_RESULT~<requestToken>~SUCCESS~GLOBAL_ALT_BOTS~<field>~<normalizedValue>~~<ON|OFF>~<minimumMasterLevel>
+Server -> Addon:  MBOT MAINTENANCE_POLICY_RESULT~<requestToken>~FAILURE~GLOBAL_ALT_BOTS~<field>~~<urlEncodedReason>
+```
+
+The writable fields are `REPAIR_ENABLED` (`ON` or `OFF`, case-insensitive) and
+`MIN_MASTER_LEVEL` (a decimal integer from 1 through the core `DEFAULT_MAX_LEVEL`;
+80 for Wrath). Every successful write includes the complete normalized policy.
+Tokens, fields, values, and reasons use the bridge URL field encoding. The complete
+response is under 100 bytes with the current fields.
+
+The following earlier maintenance messages remain supported for addon compatibility:
+
+```text
 Addon  -> Server: MBOT GET~MAINT_POLICY
 Server -> Addon:  MBOT MAINT_POLICY~<ON|OFF>~<minimumMasterLevel>
 Server -> Addon:  MBOT MAINT_POLICY_ERROR~UNAUTHORIZED

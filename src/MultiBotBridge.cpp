@@ -4139,6 +4139,122 @@ bool TryParseLevel(std::string const& value, uint32& level)
     return true;
 }
 
+char const* const kMaintenancePolicyScope = "GLOBAL_ALT_BOTS";
+char const* const kMaintenanceRepairField = "REPAIR_ENABLED";
+char const* const kMaintenanceMinLevelField = "MIN_MASTER_LEVEL";
+std::size_t constexpr kMaintenanceFieldMaxLength = 32;
+std::size_t constexpr kMaintenanceTokenMaxLength = 64;
+std::size_t constexpr kMaintenanceValueMaxLength = 64;
+
+std::string BuildMaintenancePolicyValues()
+{
+    PlayerbotAIConfig::AltMaintenancePolicy const& policy = sPlayerbotAIConfig.GetAltMaintenancePolicy();
+    std::ostringstream payload;
+    payload << (policy.repairEnabled ? "ON" : "OFF") << kFieldSeparator
+            << static_cast<uint32>(policy.minMasterLevel);
+    return payload.str();
+}
+
+void SendMaintenancePolicyResult(Player* player, ChatMsg replyType, std::string const& token,
+    std::string const& status, std::string const& field, std::string const& value, std::string const& reason)
+{
+    std::ostringstream payload;
+    payload << UrlEncodeField(token) << kFieldSeparator << status << kFieldSeparator
+            << kMaintenancePolicyScope << kFieldSeparator << UrlEncodeField(field) << kFieldSeparator
+            << UrlEncodeField(value) << kFieldSeparator << UrlEncodeField(reason);
+    if (status == "SUCCESS")
+        payload << kFieldSeparator << BuildMaintenancePolicyValues();
+
+    SendAddonPacket(player, replyType, "MAINTENANCE_POLICY_RESULT", payload.str());
+}
+
+void SendStructuredMaintenancePolicy(Player* player, ChatMsg replyType, std::string const& requestToken)
+{
+    std::string const token = Trim(UrlDecodeField(requestToken));
+    if (token.empty() || token.size() > kMaintenanceTokenMaxLength)
+    {
+        SendMaintenancePolicyResult(player, replyType, token.size() <= kMaintenanceTokenMaxLength ? token : "", "FAILURE", "", "", "INVALID_TOKEN");
+        return;
+    }
+
+    if (!HasMaintenancePolicyAccess(player))
+    {
+        SendMaintenancePolicyResult(player, replyType, token, "FAILURE", "", "", "UNAUTHORIZED");
+        return;
+    }
+
+    SendAddonPacket(player, replyType, "MAINTENANCE_POLICY",
+        UrlEncodeField(token) + std::string(1, kFieldSeparator) + kMaintenancePolicyScope +
+        kFieldSeparator + BuildMaintenancePolicyValues());
+}
+
+void RunStructuredMaintenancePolicy(Player* player, ChatMsg replyType, std::string const& requestToken,
+    std::string const& encodedField, std::string const& encodedValue)
+{
+    std::string const token = Trim(UrlDecodeField(requestToken));
+    std::string const field = ToUpper(Trim(UrlDecodeField(encodedField)));
+    std::string const value = Trim(UrlDecodeField(encodedValue));
+
+    if (token.empty() || token.size() > kMaintenanceTokenMaxLength)
+    {
+        SendMaintenancePolicyResult(player, replyType, token.size() <= kMaintenanceTokenMaxLength ? token : "", "FAILURE", field, "", "INVALID_TOKEN");
+        return;
+    }
+
+    if (encodedField.size() > kMaintenanceFieldMaxLength || encodedValue.size() > kMaintenanceValueMaxLength)
+    {
+        SendMaintenancePolicyResult(player, replyType, token, "FAILURE", field, "", "VALUE_TOO_LONG");
+        return;
+    }
+
+    if (!HasMaintenancePolicyAccess(player))
+    {
+        SendMaintenancePolicyResult(player, replyType, token, "FAILURE", field, "", "UNAUTHORIZED");
+        return;
+    }
+
+    if (field == kMaintenanceRepairField)
+    {
+        std::string const normalized = ToUpper(value);
+        if (normalized != "ON" && normalized != "OFF")
+        {
+            SendMaintenancePolicyResult(player, replyType, token, "FAILURE", field, "", "EXPECTED_ON_OR_OFF");
+            return;
+        }
+
+        sPlayerbotAIConfig.SetAltMaintenanceRepairEnabled(normalized == "ON");
+        SendMaintenancePolicyResult(player, replyType, token, "SUCCESS", field, normalized, "");
+    }
+    else if (field == kMaintenanceMinLevelField)
+    {
+        uint32 level = 0;
+        if (!TryParseLevel(value, level))
+        {
+            SendMaintenancePolicyResult(player, replyType, token, "FAILURE", field, "", "EXPECTED_INTEGER");
+            return;
+        }
+
+        if (!sPlayerbotAIConfig.SetAltMaintenanceMinMasterLevel(level))
+        {
+            std::ostringstream reason;
+            reason << "OUT_OF_RANGE_1_" << DEFAULT_MAX_LEVEL;
+            SendMaintenancePolicyResult(player, replyType, token, "FAILURE", field, "", reason.str());
+            return;
+        }
+
+        SendMaintenancePolicyResult(player, replyType, token, "SUCCESS", field, std::to_string(level), "");
+    }
+    else
+    {
+        SendMaintenancePolicyResult(player, replyType, token, "FAILURE", field, "", "UNKNOWN_FIELD");
+        return;
+    }
+
+    if (BridgeConsoleLogsEnabled())
+        LOG_INFO("playerbots", "MultiBotBridge maintenance policy updated by {}: {}={}",
+            player->GetName(), field, field == kMaintenanceRepairField ? ToUpper(value) : value);
+}
+
 void SendMaintenancePolicy(Player* player, ChatMsg replyType)
 {
     if (!HasMaintenancePolicyAccess(player))
@@ -4227,6 +4343,12 @@ bool HandleBridgeOpcode(Player* player, ChatMsg replyType, std::string const& op
         if (requestType == "MAINT_POLICY")
         {
             SendMaintenancePolicy(player, replyType);
+            return true;
+        }
+
+        if (requestType == "MAINTENANCE_POLICY")
+        {
+            SendStructuredMaintenancePolicy(player, replyType, request.second);
             return true;
         }
 
@@ -4418,6 +4540,14 @@ bool HandleBridgeOpcode(Player* player, ChatMsg replyType, std::string const& op
         {
             std::pair<std::string, std::string> const policyRequest = SplitOnce(request.second, kFieldSeparator);
             RunMaintenanceMinLevelPolicy(player, replyType, policyRequest.first, policyRequest.second);
+            return true;
+        }
+
+        if (requestType == "MAINTENANCE_POLICY")
+        {
+            std::pair<std::string, std::string> const tokenRequest = SplitOnce(request.second, kFieldSeparator);
+            std::pair<std::string, std::string> const fieldRequest = SplitOnce(tokenRequest.second, kFieldSeparator);
+            RunStructuredMaintenancePolicy(player, replyType, tokenRequest.first, fieldRequest.first, fieldRequest.second);
             return true;
         }
 
