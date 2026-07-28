@@ -352,7 +352,32 @@ Server -> Addon:  MBOT MAINT_MIN_LEVEL_ACK~<requestToken>~<effectiveLevel>
 Server -> Addon:  MBOT MAINT_MIN_LEVEL_ERROR~<requestToken>~<reason>
 ```
 
-Repair accepts only `ON` or `OFF` (case-insensitive). Minimum level accepts decimal integers from 1 through the core `DEFAULT_MAX_LEVEL` (80 for Wrath).
+Repair accepts only `ON` or `OFF` (case-insensitive). Minimum level accepts decimal integers from 1 through the core `DEFAULT_MAX_LEVEL` (80 for Wrath). The minimum applies to the controlling player/master, not the bot.
+
+### Semantics and validation
+
+- Scope is `GLOBAL_ALT_BOTS`: a successful update changes the in-memory policy for all alt bots on the worldserver.
+- Query and update access requires the requester to control at least one currently visible alt bot. Random bots are not used to grant access.
+- A write changes exactly one named field and returns the complete normalized policy, so omitted fields are never reset.
+- Configuration files are never modified. Values reset from Playerbots configuration when worldserver restarts.
+- `AiPlayerbot.MaintenanceCommand` and the startup-only per-operation `AiPlayerbot.AltMaintenance*` switches remain authoritative. The repair and minimum-level configuration entries initialize their runtime fields.
+- Tokens are required and limited to 64 characters. Encoded field and value inputs are bounded before use.
+- Unknown fields, malformed booleans, non-integer levels, out-of-range levels, oversized values, invalid tokens, and unauthorized requests return `FAILURE` without changing policy.
+
+Structured failure reasons currently include `INVALID_TOKEN`, `UNAUTHORIZED`, `VALUE_TOO_LONG`, `EXPECTED_ON_OR_OFF`, `EXPECTED_INTEGER`, `OUT_OF_RANGE_1_80`, and `UNKNOWN_FIELD`. Error reasons and user-controlled fields use the bridge URL field encoding. Unsupported opcodes retain the normal bridge behavior and do not alter existing opcode formats.
+
+### Examples
+
+```text
+MBOT GET~MAINTENANCE_POLICY~42-maint-1
+MBOT MAINTENANCE_POLICY~42-maint-1~GLOBAL_ALT_BOTS~ON~1
+
+MBOT RUN~MAINTENANCE_POLICY~42-maint-2~REPAIR_ENABLED~OFF
+MBOT MAINTENANCE_POLICY_RESULT~42-maint-2~SUCCESS~GLOBAL_ALT_BOTS~REPAIR_ENABLED~OFF~~OFF~1
+
+MBOT RUN~MAINTENANCE_POLICY~42-maint-3~MIN_MASTER_LEVEL~81
+MBOT MAINTENANCE_POLICY_RESULT~42-maint-3~FAILURE~GLOBAL_ALT_BOTS~MIN_MASTER_LEVEL~~OUT_OF_RANGE_1_80
+```
 
 ---
 
