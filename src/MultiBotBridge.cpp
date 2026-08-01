@@ -4374,6 +4374,8 @@ bool HandleBridgeOpcode(Player* player, ChatMsg replyType, std::string const& op
     if (normalized == "HELLO")
     {
         SendAddonPacket(player, replyType, "HELLO_ACK", std::string(kProtocolVersion) + kFieldSeparator + kBridgeName);
+        bool const canTeleport = player && player->GetSession() && player->GetSession()->HasPermission(rbac::RBAC_PERM_COMMAND_TELE);
+        SendAddonPacket(player, replyType, "TELEPORT_ACCESS", canTeleport ? "1" : "0");
         return true;
     }
 
