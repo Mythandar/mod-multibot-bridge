@@ -18,6 +18,7 @@
 #include "Playerbots.h"
 #include "RandomPlayerbotMgr.h"
 #include "ReputationMgr.h"
+#include "RBAC.h"
 #include "AiObjectContext.h"
 #include "ScriptedGossip.h"
 #include "ScriptMgr.h"
@@ -66,6 +67,58 @@ void RunProfessionRecipeCraftCommand(Player* requester, ChatMsg replyType, std::
 void RunInventoryItemActionCommand(Player* requester, ChatMsg replyType, std::string const& botName, std::string const& requestToken, std::string const& actionValue, std::string const& itemIdValue, std::string const& countValue);
 void SendBotReputationPackets(Player* requester, ChatMsg replyType, std::string const& botName, std::string const& requestToken);
 void SendBotEmblemPackets(Player* requester, ChatMsg replyType, std::string const& botName, std::string const& requestToken);
+std::string Trim(std::string const& value);
+std::string UrlEncodeField(std::string const& value);
+std::string UrlDecodeField(std::string const& value);
+void SendTeleportPackets(Player* requester, ChatMsg replyType, std::string const& requestToken, std::string const& searchValue, std::string const& mapValue, std::string const& offsetValue)
+{
+    std::string const token = Trim(UrlDecodeField(requestToken));
+    if (!requester || !requester->GetSession() || token.empty())
+        return;
+
+    if (!requester->GetSession()->HasPermission(rbac::RBAC_PERM_COMMAND_TELE))
+    {
+        SendAddonPacket(requester, replyType, "TELEPORTS_ERROR", token + kFieldSeparator + "UNAUTHORIZED");
+        return;
+    }
+
+    std::string search = Trim(UrlDecodeField(searchValue));
+    WorldDatabase.EscapeString(search);
+    bool const filterMap = !Trim(mapValue).empty();
+    uint32 const mapId = filterMap ? static_cast<uint32>(std::strtoul(Trim(mapValue).c_str(), nullptr, 10)) : 0;
+    uint32 const offset = static_cast<uint32>(std::strtoul(Trim(offsetValue).c_str(), nullptr, 10));
+    uint32 const pageSize = 40;
+
+    std::string where = " WHERE 1=1";
+    if (!search.empty())
+        where += " AND name LIKE \x27%" + search + "%\x27";
+    if (filterMap)
+        where += " AND map = " + std::to_string(mapId);
+
+    QueryResult countResult = WorldDatabase.Query("SELECT COUNT(*) FROM game_tele" + where);
+    uint32 const total = countResult ? countResult->Fetch()[0].Get<uint32>() : 0;
+    std::ostringstream begin;
+    begin << token << kFieldSeparator << total << kFieldSeparator << offset << kFieldSeparator << pageSize;
+    SendAddonPacket(requester, replyType, "TELEPORTS_BEGIN", begin.str());
+
+    QueryResult result = WorldDatabase.Query("SELECT id, map, position_x, position_y, position_z, name FROM game_tele" + where +
+        " ORDER BY name LIMIT " + std::to_string(offset) + "," + std::to_string(pageSize));
+    if (result)
+    {
+        do
+        {
+            Field* fields = result->Fetch();
+            std::ostringstream item;
+            item << token << kFieldSeparator << fields[0].Get<uint32>() << kFieldSeparator
+                 << fields[1].Get<uint32>() << kFieldSeparator << fields[2].Get<float>() << kFieldSeparator
+                 << fields[3].Get<float>() << kFieldSeparator << fields[4].Get<float>() << kFieldSeparator
+                 << UrlEncodeField(fields[5].Get<std::string>());
+            SendAddonPacket(requester, replyType, "TELEPORTS_ITEM", item.str());
+        } while (result->NextRow());
+    }
+    SendAddonPacket(requester, replyType, "TELEPORTS_END", token);
+}
+
 uint32 GetPct(uint32 current, uint32 max);
 
 std::string Trim(std::string const& value)
@@ -4115,14 +4168,9 @@ void SendStatsPackets(Player* player, ChatMsg replyType)
 
 bool HasMaintenancePolicyAccess(Player* player)
 {
-    for (Player* const bot : GetBridgeVisibleBots(player))
-    {
-        PlayerbotAI* const botAI = GetBotAI(bot);
-        if (botAI && botAI->IsAltBot() && botAI->GetMaster() == player)
-            return true;
-    }
-
-    return false;
+    // Policy configuration must remain available before an alt bot is summoned.
+    // The bridge only invokes this path for an authenticated in-world player.
+    return player != nullptr;
 }
 
 bool TryParseLevel(std::string const& value, uint32& level)
@@ -4418,6 +4466,15 @@ bool HandleBridgeOpcode(Player* player, ChatMsg replyType, std::string const& op
         {
             std::pair<std::string, std::string> const gameObjectRequest = SplitOnce(request.second, kFieldSeparator);
             SendGameObjectPackets(player, replyType, gameObjectRequest.first, gameObjectRequest.second);
+            return true;
+        }
+
+        if (requestType == "TELEPORTS")
+        {
+            std::pair<std::string, std::string> const tokenRequest = SplitOnce(request.second, kFieldSeparator);
+            std::pair<std::string, std::string> const searchRequest = SplitOnce(tokenRequest.second, kFieldSeparator);
+            std::pair<std::string, std::string> const mapRequest = SplitOnce(searchRequest.second, kFieldSeparator);
+            SendTeleportPackets(player, replyType, tokenRequest.first, searchRequest.first, mapRequest.first, mapRequest.second);
             return true;
         }
 
