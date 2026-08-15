@@ -92,6 +92,11 @@ mana. The option never restores health, is removed when disabled or on logout,
 and must be restored by the addon after the next bridge handshake. The bridge
 requires the sender to have the AzerothCore aura-command RBAC permission.
 
+An independently saved addon checkbox can also request automatic sitting. When
+selected, the bridge sits the player after five continuous seconds of safe
+inactivity below 65% mana. Moving, combat, casting, mounting, flight or vehicle
+travel, swimming, falling, and death reset the inactivity timer.
+
 ---
 
 # What is mod-multibot-bridge?

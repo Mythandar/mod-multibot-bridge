@@ -53,10 +53,13 @@ char const kFieldSeparator = '~';
 uint32 constexpr kPlayerRestRegenSpellId = 25990;
 float constexpr kPlayerRestRegenStartPct = 65.0f;
 uint32 constexpr kPlayerRestRegenUpdateMs = 1000;
+uint32 constexpr kPlayerRestRegenAutoSitMs = 5000;
 
 struct PlayerRestRegenState
 {
     uint32 elapsedMs = 0;
+    uint32 stationaryMs = 0;
+    bool autoSitEnabled = false;
 };
 
 std::map<ObjectGuid::LowType, PlayerRestRegenState> sPlayerRestRegenStates;
@@ -64,6 +67,7 @@ std::map<ObjectGuid::LowType, PlayerRestRegenState> sPlayerRestRegenStates;
 std::string Trim(std::string const& value);
 std::string ToUpper(std::string value);
 std::string UrlDecodeField(std::string const& value);
+std::pair<std::string, std::string> SplitOnce(std::string const& value, char separator);
 void SendAddonPacket(Player* player, ChatMsg chatType, std::string const& opcode, std::string const& payload);
 
 bool BridgeConsoleLogsEnabled()
@@ -85,7 +89,7 @@ void DisablePlayerRestRegen(Player* player)
     player->RemoveAurasDueToSpell(kPlayerRestRegenSpellId);
 }
 
-void RunPlayerRestRegenSetting(Player* player, ChatMsg replyType, std::string const& requestToken, std::string const& value)
+void RunPlayerRestRegenSetting(Player* player, ChatMsg replyType, std::string const& requestToken, std::string const& settingValues)
 {
     std::string const token = Trim(UrlDecodeField(requestToken));
     if (!HasPlayerRestRegenAccess(player))
@@ -94,19 +98,35 @@ void RunPlayerRestRegenSetting(Player* player, ChatMsg replyType, std::string co
         return;
     }
 
-    std::string const normalized = ToUpper(Trim(value));
+    std::pair<std::string, std::string> const values = SplitOnce(settingValues, kFieldSeparator);
+    std::string const normalized = ToUpper(Trim(values.first));
     if (normalized != "ON" && normalized != "OFF")
     {
         SendAddonPacket(player, replyType, "PLAYER_REST_REGEN_ERROR", token + kFieldSeparator + "EXPECTED_ON_OR_OFF");
         return;
     }
 
+    std::string const autoSitValue = ToUpper(Trim(values.second));
+    if (!autoSitValue.empty() && autoSitValue != "AUTOSIT_ON" && autoSitValue != "AUTOSIT_OFF")
+    {
+        SendAddonPacket(player, replyType, "PLAYER_REST_REGEN_ERROR", token + kFieldSeparator + "EXPECTED_AUTOSIT_ON_OR_OFF");
+        return;
+    }
+
+    bool const autoSitEnabled = autoSitValue == "AUTOSIT_ON";
+
     if (normalized == "ON")
-        sPlayerRestRegenStates[player->GetGUID().GetCounter()] = {};
+    {
+        PlayerRestRegenState& state = sPlayerRestRegenStates[player->GetGUID().GetCounter()];
+        state.stationaryMs = 0;
+        state.autoSitEnabled = autoSitEnabled;
+    }
     else
         DisablePlayerRestRegen(player);
 
-    SendAddonPacket(player, replyType, "PLAYER_REST_REGEN_ACK", token + kFieldSeparator + normalized);
+    bool const autoSitActive = normalized == "ON" && autoSitEnabled;
+    SendAddonPacket(player, replyType, "PLAYER_REST_REGEN_ACK", token + kFieldSeparator + normalized +
+        kFieldSeparator + (autoSitActive ? "AUTOSIT_ON" : "AUTOSIT_OFF"));
 }
 
 void UpdatePlayerRestRegen(Player* player, uint32 elapsedMs)
@@ -119,6 +139,21 @@ void UpdatePlayerRestRegen(Player* player, uint32 elapsedMs)
         return;
 
     PlayerRestRegenState& state = stateItr->second;
+
+    bool const autoSitEligible = state.autoSitEnabled && player->IsAlive() && !player->IsInCombat() &&
+        !player->IsMounted() && !player->IsInFlight() && !player->GetVehicle() && !player->isMoving() &&
+        !player->IsInWater() && !player->HasUnitMovementFlag(MOVEMENTFLAG_FALLING) &&
+        !player->IsNonMeleeSpellCast(false) && !player->IsSitState() && player->getPowerType() == POWER_MANA &&
+        player->GetPowerPct(POWER_MANA) < kPlayerRestRegenStartPct;
+    if (!autoSitEligible)
+        state.stationaryMs = 0;
+    else if (state.stationaryMs < kPlayerRestRegenAutoSitMs)
+    {
+        state.stationaryMs = std::min(state.stationaryMs + elapsedMs, kPlayerRestRegenAutoSitMs);
+        if (state.stationaryMs >= kPlayerRestRegenAutoSitMs)
+            player->SetStandState(UNIT_STAND_STATE_SIT);
+    }
+
     state.elapsedMs += elapsedMs;
     if (state.elapsedMs < kPlayerRestRegenUpdateMs)
         return;
