@@ -24,6 +24,7 @@
 #include "ScriptMgr.h"
 #include "SharedDefines.h"
 #include "Spell.h"
+#include "SpellAuras.h"
 #include "SpellMgr.h"
 #include "Trainer.h"
 #include "Unit.h"
@@ -49,10 +50,140 @@ char const* const kAddonPrefix = "MBOT";
 char const* const kBridgeName = "mod-multibot-bridge";
 char const* const kProtocolVersion = "1";
 char const kFieldSeparator = '~';
+uint32 constexpr kPlayerRestRegenSpellId = 25990;
+float constexpr kPlayerRestRegenStartPct = 65.0f;
+uint32 constexpr kPlayerRestRegenUpdateMs = 1000;
+uint32 constexpr kPlayerRestRegenAutoSitMs = 5000;
+
+struct PlayerRestRegenState
+{
+    uint32 elapsedMs = 0;
+    uint32 stationaryMs = 0;
+    bool autoSitEnabled = false;
+};
+
+std::map<ObjectGuid::LowType, PlayerRestRegenState> sPlayerRestRegenStates;
+
+std::string Trim(std::string const& value);
+std::string ToUpper(std::string value);
+std::string UrlDecodeField(std::string const& value);
+std::pair<std::string, std::string> SplitOnce(std::string const& value, char separator);
+void SendAddonPacket(Player* player, ChatMsg chatType, std::string const& opcode, std::string const& payload);
 
 bool BridgeConsoleLogsEnabled()
 {
     return sConfigMgr->GetOption<bool>("MultiBotBridge.EnableConsoleLogs", true);
+}
+
+bool HasPlayerRestRegenAccess(Player* player)
+{
+    return player && player->GetSession() && player->GetSession()->HasPermission(rbac::RBAC_PERM_COMMAND_AURA);
+}
+
+void DisablePlayerRestRegen(Player* player)
+{
+    if (!player)
+        return;
+
+    sPlayerRestRegenStates.erase(player->GetGUID().GetCounter());
+    player->RemoveAurasDueToSpell(kPlayerRestRegenSpellId);
+}
+
+void RunPlayerRestRegenSetting(Player* player, ChatMsg replyType, std::string const& requestToken, std::string const& settingValues)
+{
+    std::string const token = Trim(UrlDecodeField(requestToken));
+    if (!HasPlayerRestRegenAccess(player))
+    {
+        SendAddonPacket(player, replyType, "PLAYER_REST_REGEN_ERROR", token + kFieldSeparator + "UNAUTHORIZED");
+        return;
+    }
+
+    std::pair<std::string, std::string> const values = SplitOnce(settingValues, kFieldSeparator);
+    std::string const normalized = ToUpper(Trim(values.first));
+    if (normalized != "ON" && normalized != "OFF")
+    {
+        SendAddonPacket(player, replyType, "PLAYER_REST_REGEN_ERROR", token + kFieldSeparator + "EXPECTED_ON_OR_OFF");
+        return;
+    }
+
+    std::string const autoSitValue = ToUpper(Trim(values.second));
+    if (!autoSitValue.empty() && autoSitValue != "AUTOSIT_ON" && autoSitValue != "AUTOSIT_OFF")
+    {
+        SendAddonPacket(player, replyType, "PLAYER_REST_REGEN_ERROR", token + kFieldSeparator + "EXPECTED_AUTOSIT_ON_OR_OFF");
+        return;
+    }
+
+    bool const autoSitEnabled = autoSitValue == "AUTOSIT_ON";
+
+    if (normalized == "ON")
+    {
+        PlayerRestRegenState& state = sPlayerRestRegenStates[player->GetGUID().GetCounter()];
+        state.stationaryMs = 0;
+        state.autoSitEnabled = autoSitEnabled;
+    }
+    else
+        DisablePlayerRestRegen(player);
+
+    bool const autoSitActive = normalized == "ON" && autoSitEnabled;
+    SendAddonPacket(player, replyType, "PLAYER_REST_REGEN_ACK", token + kFieldSeparator + normalized +
+        kFieldSeparator + (autoSitActive ? "AUTOSIT_ON" : "AUTOSIT_OFF"));
+}
+
+void UpdatePlayerRestRegen(Player* player, uint32 elapsedMs)
+{
+    if (!player)
+        return;
+
+    auto const stateItr = sPlayerRestRegenStates.find(player->GetGUID().GetCounter());
+    if (stateItr == sPlayerRestRegenStates.end())
+        return;
+
+    PlayerRestRegenState& state = stateItr->second;
+
+    bool const autoSitEligible = state.autoSitEnabled && player->IsAlive() && !player->IsInCombat() &&
+        !player->IsMounted() && !player->IsInFlight() && !player->GetVehicle() && !player->isMoving() &&
+        !player->IsInWater() && !player->HasUnitMovementFlag(MOVEMENTFLAG_FALLING) &&
+        !player->IsNonMeleeSpellCast(false) && !player->IsSitState() && player->getPowerType() == POWER_MANA &&
+        player->GetPowerPct(POWER_MANA) < kPlayerRestRegenStartPct;
+    if (!autoSitEligible)
+        state.stationaryMs = 0;
+    else if (state.stationaryMs < kPlayerRestRegenAutoSitMs)
+    {
+        state.stationaryMs = std::min(state.stationaryMs + elapsedMs, kPlayerRestRegenAutoSitMs);
+        if (state.stationaryMs >= kPlayerRestRegenAutoSitMs)
+            player->SetStandState(UNIT_STAND_STATE_SIT);
+    }
+
+    state.elapsedMs += elapsedMs;
+    if (state.elapsedMs < kPlayerRestRegenUpdateMs)
+        return;
+    state.elapsedMs = 0;
+
+    bool const canRest = player->IsAlive() && !player->IsInCombat() && !player->IsMounted() &&
+        !player->isMoving() && player->IsSitState() && player->getPowerType() == POWER_MANA;
+    if (!canRest)
+    {
+        player->RemoveAurasDueToSpell(kPlayerRestRegenSpellId);
+        return;
+    }
+
+    float const manaPct = player->GetPowerPct(POWER_MANA);
+    if (manaPct >= 100.0f)
+    {
+        player->RemoveAurasDueToSpell(kPlayerRestRegenSpellId);
+        return;
+    }
+
+    if (manaPct >= kPlayerRestRegenStartPct || player->HasAura(kPlayerRestRegenSpellId))
+        return;
+
+    SpellInfo const* spellInfo = sSpellMgr->GetSpellInfo(kPlayerRestRegenSpellId);
+    if (!spellInfo)
+        return;
+
+    // Effect 1 is the spell's percentage-based mana regeneration. Excluding effect 0
+    // deliberately avoids granting the matching health regeneration to real players.
+    Aura::TryRefreshStackOrCreate(spellInfo, 1 << EFFECT_1, player, player);
 }
 
 Player* FindBotByName(Player* player, std::string const& botName);
@@ -4376,6 +4507,7 @@ bool HandleBridgeOpcode(Player* player, ChatMsg replyType, std::string const& op
         SendAddonPacket(player, replyType, "HELLO_ACK", std::string(kProtocolVersion) + kFieldSeparator + kBridgeName);
         bool const canTeleport = player && player->GetSession() && player->GetSession()->HasPermission(rbac::RBAC_PERM_COMMAND_TELE);
         SendAddonPacket(player, replyType, "TELEPORT_ACCESS", canTeleport ? "1" : "0");
+        SendAddonPacket(player, replyType, "PLAYER_REST_REGEN_ACCESS", HasPlayerRestRegenAccess(player) ? "1" : "0");
         return true;
     }
 
@@ -4588,6 +4720,13 @@ bool HandleBridgeOpcode(Player* player, ChatMsg replyType, std::string const& op
         std::pair<std::string, std::string> const request = SplitOnce(payload, kFieldSeparator);
         std::string const requestType = ToUpper(Trim(request.first));
 
+        if (requestType == "PLAYER_REST_REGEN")
+        {
+            std::pair<std::string, std::string> const settingRequest = SplitOnce(request.second, kFieldSeparator);
+            RunPlayerRestRegenSetting(player, replyType, settingRequest.first, settingRequest.second);
+            return true;
+        }
+
         if (requestType == "MAINT_REPAIR")
         {
             std::pair<std::string, std::string> const policyRequest = SplitOnce(request.second, kFieldSeparator);
@@ -4698,6 +4837,16 @@ class MultiBotBridgePlayerScript final : public PlayerScript
 {
 public:
     MultiBotBridgePlayerScript() : PlayerScript("MultiBotBridgePlayerScript") {}
+
+    void OnPlayerUpdate(Player* player, uint32 elapsedMs) override
+    {
+        UpdatePlayerRestRegen(player, elapsedMs);
+    }
+
+    void OnPlayerLogout(Player* player) override
+    {
+        DisablePlayerRestRegen(player);
+    }
 
     bool TryHandle(Player* player, uint32 type, uint32 lang, std::string& msg)
     {

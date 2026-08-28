@@ -80,6 +80,23 @@ You also need the client addon:
 Without the addon, this module does nothing visible by itself.  
 Without this module, the addon cannot use the new bridge-first / mostly chatless UI refresh paths.
 
+## Player rest regeneration
+
+The bridge supports an opt-in, GM-authorized rest regeneration setting for the
+controlling player. The addon sends `RUN~PLAYER_REST_REGEN~<token>~ON|OFF` and
+the bridge replies with `PLAYER_REST_REGEN_ACK` or `PLAYER_REST_REGEN_ERROR`.
+
+When enabled, the bridge applies only the mana effect from spell 25990 while the
+player is alive, out of combat, unmounted, stationary, seated, and below 65%
+mana. The option never restores health, is removed when disabled or on logout,
+and must be restored by the addon after the next bridge handshake. The bridge
+requires the sender to have the AzerothCore aura-command RBAC permission.
+
+An independently saved addon checkbox can also request automatic sitting. When
+selected, the bridge sits the player after five continuous seconds of safe
+inactivity below 65% mana. Moving, combat, casting, mounting, flight or vehicle
+travel, swimming, falling, and death reset the inactivity timer.
+
 ---
 
 # What is mod-multibot-bridge?
